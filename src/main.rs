@@ -12,7 +12,7 @@ use std::{
     ffi::CString,
     os::unix::prelude::OsStrExt,
     path::PathBuf,
-    process::Stdio,
+    process::{Output, Stdio},
     rc::Rc,
     thread::JoinHandle,
 };
@@ -119,8 +119,10 @@ unsafe fn run_event_loop(
                     // BorrowMutError from RefCell.
                     drop(children);
                     let output = handle.join().unwrap();
-                    let output = lua.create_string(&output)?;
-                    exec_callback.call((ident, output))?;
+                    let stdout = lua.create_string(&output.stdout)?;
+                    let stderr = lua.create_string(&output.stderr)?;
+                    let code = output.status.code();
+                    exec_callback.call((ident, code, stdout, stderr))?;
                 }
             }
         }
@@ -236,22 +238,18 @@ unsafe fn create_uinput(device_name: &str) -> i32 {
     fdo
 }
 
-type Children = Rc<RefCell<Vec<(JoinHandle<Vec<u8>>, i32)>>>;
+type Children = Rc<RefCell<Vec<(JoinHandle<Output>, i32)>>>;
 fn create_lua(children: Children) -> Lua {
     let lua = mlua::Lua::new();
     let execute = lua
-        .create_function(move |_, (ident, cmd): (i32, Vec<String>)| {
+        .create_function(move |_, (ident, cmd, args): (i32, String, Vec<String>)| {
             let handle = std::thread::spawn(move || {
-                if let Some(program) = cmd.get(0) {
-                    let output = std::process::Command::new(program)
-                        .args(cmd.into_iter().skip(1))
-                        .stdout(Stdio::piped())
-                        .output()
-                        .unwrap();
-                    output.stdout
-                } else {
-                    Vec::new()
-                }
+                std::process::Command::new(cmd)
+                    .args(args.into_iter())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .unwrap()
             });
             children.borrow_mut().push((handle, ident));
             Ok(())

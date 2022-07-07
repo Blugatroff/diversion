@@ -13,7 +13,9 @@ function string:split(pat) -- https://stackoverflow.com/a/1647577
 end
 
 function find_sinks()
-    return execute({ 'pactl', 'list', 'sink-inputs' }):next(function(s)
+    return execute('pactl', { 'list', 'sink-inputs' }):next(function(output)
+        print('pactl list sink-inputs', output.code)
+        local s = output.stdout
         local sinks = {}
         local sink = nil
         for line in s:split('\n') do
@@ -38,8 +40,8 @@ function change_sink_volume(name, change, sinks)
     name = string.lower(name)
     return find_sinks():next(function(sinks)
         if sinks[name] then
-            local cmd = { 'pactl', 'set-sink-input-volume', sinks[name], change }
-            return execute(cmd)
+            local args = { 'set-sink-input-volume', sinks[name], change }
+            return execute('pactl', args)
         else
             for k, v in pairs(sinks) do
                 if string.find(k, name) then
@@ -51,7 +53,8 @@ function change_sink_volume(name, change, sinks)
             for k, v in pairs(sinks) do
                 print(k, v)
             end
-            return execute({ "notify-send", 'sink " .. name .. " does not exist' })
+            local msg = "sink " .. name .. " does not exist"
+            return execute("notify-send", { msg })
         end
     end)
 end
