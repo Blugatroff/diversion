@@ -1,9 +1,9 @@
 use mlua::Lua;
 use nix::{
-    ioctl_none_bad, ioctl_write_int_bad,
+    ioctl_none_bad, ioctl_write_int_bad, ioctl_write_ptr_bad,
     libc::{
-        self, fd_set, input_event, timeval, ABS_MAX, FD_ISSET, FD_SET, KEY_MAX, O_NONBLOCK,
-        O_RDONLY, O_WRONLY, REL_MAX,
+        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, KEY_MAX, O_NONBLOCK, O_RDONLY,
+        O_WRONLY, REL_MAX,
     },
     request_code_none, request_code_write,
 };
@@ -28,6 +28,11 @@ ioctl_write_int_bad!(eviocgrab, request_code_write!('E', 0x90, 4));
 ioctl_write_int_bad!(ui_set_evbit, request_code_write!('U', 100, 4));
 ioctl_write_int_bad!(ui_set_keybit, request_code_write!('U', 101, 4));
 ioctl_write_int_bad!(ui_set_relbit, request_code_write!('U', 102, 4));
+ioctl_write_ptr_bad!(
+    ui_dev_setup,
+    request_code_write!('U', 3, std::mem::size_of::<libc::uinput_setup>()),
+    libc::uinput_setup
+);
 ioctl_none_bad!(ui_dev_create, request_code_none!('U', 1));
 
 #[derive(structopt::StructOpt)]
@@ -113,10 +118,9 @@ unsafe fn run_event_loop(
                     .map(|(i, _)| i);
                 if let Some(index) = finished {
                     let (handle, ident) = children.swap_remove(index);
-                    // The lua script could call `execute` in the `exec_callback`.
-                    // If the `children` wasn't dropped then the implementation
-                    // of `execute` would try to borrow children again causing a
-                    // BorrowMutError from RefCell.
+                    // The lua script could call `execute` in the `exec_callback` function.
+                    // If the `children` RefCell wasn't dropped then the implementation
+                    // of `execute` would try to borrow children again causing a BorrowMutError.
                     drop(children);
                     let output = handle.join().unwrap();
                     let stdout = lua.create_string(&output.stdout)?;
@@ -173,7 +177,7 @@ fn open_devices(devices: &[PathBuf]) -> Vec<i32> {
             let path = CString::new(path.as_path().as_os_str().as_bytes()).unwrap();
             let fdi = libc::open(path.as_ptr(), O_RDONLY);
             if fdi < 0 {
-                eprintln!("cannot device {:?}", path);
+                eprintln!("cannot access device {:?}", path);
                 Result::<(), std::io::Error>::Err(std::io::Error::last_os_error()).unwrap();
             }
             // grab all input from the input device
@@ -187,7 +191,7 @@ unsafe fn create_uinput(device_name: &str) -> i32 {
     let path = CString::new("/dev/uinput").unwrap();
     let fdo = libc::open(path.as_ptr(), O_WRONLY | O_NONBLOCK);
     if fdo < 0 {
-        println!("cannot open /dev/uinput");
+        println!("cannot open {}", path.to_str().unwrap());
         Result::<(), std::io::Error>::Err(std::io::Error::last_os_error()).unwrap();
     }
 
@@ -204,36 +208,27 @@ unsafe fn create_uinput(device_name: &str) -> i32 {
     }
 
     if device_name.is_empty() {
-        eprintln!("name cannot be empty");
+        eprintln!("Name cannot be empty!");
+        std::process::exit(1);
+    } else if device_name.len() > 0x50 {
+        eprintln!("Name cannot be longer than {} characters!", 0x50);
         std::process::exit(1);
     }
     let mut name = [0; 0x50];
     for (i, b) in device_name.as_bytes().iter().enumerate() {
         name[i] = *b as i8;
     }
-    let uidev = libc::uinput_user_dev {
-        name,
+    let setup: libc::uinput_setup = libc::uinput_setup {
         id: libc::input_id {
             bustype: BUS_USB,
             vendor: 1,
             product: 1,
             version: 1,
         },
+        name,
         ff_effects_max: 0,
-        absmax: [0; ABS_MAX as usize + 1],
-        absmin: [0; ABS_MAX as usize + 1],
-        absfuzz: [0; ABS_MAX as usize + 1],
-        absflat: [0; ABS_MAX as usize + 1],
     };
-    if libc::write(
-        fdo,
-        &uidev as *const _ as *const libc::c_void,
-        std::mem::size_of_val(&uidev),
-    ) < 0
-    {
-        Result::<(), std::io::Error>::Err(std::io::Error::last_os_error()).unwrap();
-    }
-
+    ui_dev_setup(fdo, &setup as *const libc::uinput_setup).unwrap();
     ui_dev_create(fdo).unwrap();
     fdo
 }
@@ -255,7 +250,7 @@ fn create_lua(children: Children) -> Lua {
             Ok(())
         })
         .unwrap();
-    lua.globals().set("native_execute", execute).unwrap();
+    lua.globals().set("async_execute", execute).unwrap();
     lua
 }
 
@@ -263,30 +258,27 @@ fn lua_attach_send_event(lua: &Lua, fd: i32) {
     lua.globals()
         .set(
             "send_event",
-            lua.create_function(create_event_sender(fd)).unwrap(),
+            lua.create_function(move |_, (ty, code, value)| unsafe {
+                let ev = input_event {
+                    time: timeval {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                    },
+                    type_: ty,
+                    code,
+                    value,
+                };
+                if libc::write(
+                    fd,
+                    &ev as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&ev),
+                ) < 0
+                {
+                    Result::<(), std::io::Error>::Err(std::io::Error::last_os_error()).unwrap();
+                }
+                Ok(())
+            })
+            .unwrap(),
         )
         .unwrap();
-}
-
-fn create_event_sender(fd: i32) -> impl Fn(&mlua::Lua, (u16, u16, i32)) -> Result<(), mlua::Error> {
-    move |_, (ty, code, value)| unsafe {
-        let ev = input_event {
-            time: timeval {
-                tv_sec: 0,
-                tv_usec: 0,
-            },
-            type_: ty,
-            code,
-            value,
-        };
-        if libc::write(
-            fd,
-            &ev as *const _ as *const libc::c_void,
-            std::mem::size_of_val(&ev),
-        ) < 0
-        {
-            Result::<(), std::io::Error>::Err(std::io::Error::last_os_error()).unwrap();
-        }
-        Ok(())
-    }
 }

@@ -249,7 +249,7 @@ current_function = 0
 execute_callbacks = {}
 function execute(cmd, args)
     return Promise:new(function(resolve)
-        native_execute(current_function, cmd, args)
+        async_execute(current_function, cmd, args)
         execute_callbacks[current_function] = function(code, stdout, stderr)
             resolve({ code = code, stdout = stdout, stderr = stderr })
         end
