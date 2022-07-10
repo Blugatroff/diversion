@@ -46,7 +46,8 @@ Diversion will call the global function **<em>on_event</em>** with the **device_
     send an event to the virtual input device
 - **reload**() -> !<br>
     reload the script, this is useful editing the script without having to restart Diversion
-- **async_execute**(cmd: string, args: string[], callback: (exit_code: number, stdout: string, stderr: string) -> any)<br>
+- **async_execute**(ident: number, cmd: string, args: string[])<br>
     The native [os.execute()](https://www.lua.org/pil/22.2.html) from Luas' standard library is blocking, which means that the script will block the entire main thread of Diversion and no events will be received. So if you wanted to create a shortcut to run some command then every device you passed to Diversion will be frozen whenever that command is running.
 
-    **async_execute** avoids this by running the command and waiting for it to finish in a separate thread. Once the child process has finished the thread will exit and the **callback** will be invoked.
+    **async_execute** avoids this by running the command and waiting for it to finish in a separate thread. Once the child process has finished the thread will exit and the global function **exec_callback**(ident: number, exit_code: number, stdout: string, stderr: string) will be invoked.<br>
+    The **ident** passed to **async_execute** is later passed back to the **exec_callback** to be able to associate the two.
