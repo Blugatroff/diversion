@@ -3,6 +3,10 @@ name = "diversion"
 version = "0.1.1"
 edition = "2021"
 
+[[bin]]
+path = "./main.rs"
+name = "diversion"
+
 [dependencies]
 structopt = "0.3.26"
 
