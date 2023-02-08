@@ -2,7 +2,7 @@ use mlua::Lua;
 use nix::{
     ioctl_none_bad, ioctl_write_int_bad, ioctl_write_ptr_bad,
     libc::{
-        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, KEY_MAX, O_NONBLOCK, O_RDONLY,
+        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, O_NONBLOCK, O_RDONLY,
         O_WRONLY, REL_MAX,
     },
     request_code_none, request_code_write,
@@ -25,6 +25,11 @@ const EV_REL: i32 = 2;
 const EV_MSC: i32 = 4;
 const BUS_USB: u16 = 3;
 
+const BTN_LEFT: i32 = 0x110;
+const BTN_TASK: i32 = 0x117;
+const BTN_0: i32 = 0x100;
+const BTN_9: i32 = 0x109;
+
 // https://github.com/torvalds/linux/blob/68e77ffbfd06ae3ef8f2abf1c3b971383c866983/include/uapi/linux/input.h#L186
 ioctl_write_int_bad!(eviocgrab, request_code_write!('E', 0x90, 4));
 
@@ -42,6 +47,7 @@ ioctl_write_ptr_bad!(
 
 // https://github.com/torvalds/linux/blob/5bfc75d92efd494db37f5c4c173d3639d4772966/include/uapi/linux/uinput.h#L64
 ioctl_none_bad!(ui_dev_create, request_code_none!('U', 1));
+ioctl_none_bad!(ui_dev_destroy, request_code_none!('U', 2));
 
 #[derive(structopt::StructOpt)]
 #[structopt(name = "shortcuts")]
@@ -73,7 +79,13 @@ unsafe fn run(
     let devices: Vec<i32> = open_devices(devices)?;
     let fd = create_uinput(device_name)?;
     loop {
-        run_event_loop(&devices, &script, fd)?
+        match run_event_loop(&devices, &script, fd) {
+            Ok(()) => {},
+            Err(e) => {
+                destroy_uinput(fd)?;
+                break Err(e);
+            },
+        }
     }
 }
 
@@ -225,17 +237,26 @@ unsafe fn create_uinput(device_name: &str) -> Result<i32, Error> {
     }
 
     ui_set_evbit(fdo, EV_SYN)?;
+    ui_set_evbit(fdo, EV_MSC)?;
     ui_set_evbit(fdo, EV_KEY)?;
     ui_set_evbit(fdo, EV_REL)?;
-    ui_set_evbit(fdo, EV_MSC)?;
 
-    for i in 0..KEY_MAX as i32 {
+    for i in 0..255 {
         ui_set_keybit(fdo, i)?;
     }
+    for i in BTN_LEFT..=BTN_TASK {
+        ui_set_keybit(fdo, i)?;
+    }
+    for i in BTN_0..=BTN_9 {
+        ui_set_keybit(fdo, i)?;
+    }
+
+    //ui_set_keybit(fdo, 255)?;
     for i in 0..REL_MAX as i32 {
         ui_set_relbit(fdo, i)?;
     }
-
+    
+    ui_set_keybit(fdo, 57)?;
     if device_name.is_empty() {
         eprintln!("Name cannot be empty!");
         std::process::exit(1);
@@ -260,6 +281,12 @@ unsafe fn create_uinput(device_name: &str) -> Result<i32, Error> {
     ui_dev_setup(fdo, &setup as *const libc::uinput_setup)?;
     ui_dev_create(fdo)?;
     Ok(fdo)
+}
+
+unsafe fn destroy_uinput(fd: i32) -> Result<(), Error> {
+    ui_dev_destroy(fd)?;
+    libc::close(fd);
+    Ok(())
 }
 
 type Children = Rc<RefCell<Vec<(JoinHandle<Output>, i32)>>>;
