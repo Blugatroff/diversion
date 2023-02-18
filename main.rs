@@ -27,8 +27,6 @@ const BUS_USB: u16 = 3;
 
 const BTN_LEFT: i32 = 0x110;
 const BTN_TASK: i32 = 0x117;
-const BTN_0: i32 = 0x100;
-const BTN_9: i32 = 0x109;
 
 // https://github.com/torvalds/linux/blob/68e77ffbfd06ae3ef8f2abf1c3b971383c866983/include/uapi/linux/input.h#L186
 ioctl_write_int_bad!(eviocgrab, request_code_write!('E', 0x90, 4));
@@ -245,9 +243,6 @@ unsafe fn create_uinput(device_name: &str) -> Result<i32, Error> {
         ui_set_keybit(fdo, i)?;
     }
     for i in BTN_LEFT..=BTN_TASK {
-        ui_set_keybit(fdo, i)?;
-    }
-    for i in BTN_0..=BTN_9 {
         ui_set_keybit(fdo, i)?;
     }
 
