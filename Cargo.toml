@@ -15,5 +15,5 @@ version = "0.24.1"
 features = ["ioctl"]
 
 [dependencies.mlua]
-version = "0.8.1"
-features = ["luajit"]
+version = "0.8.9"
+features = ["lua54"]

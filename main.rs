@@ -2,19 +2,21 @@ use mlua::Lua;
 use nix::{
     ioctl_none_bad, ioctl_write_int_bad, ioctl_write_ptr_bad,
     libc::{
-        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, O_NONBLOCK, O_RDONLY,
-        O_WRONLY, REL_MAX,
+        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, O_NONBLOCK, O_RDONLY, O_WRONLY,
+        REL_MAX,
     },
     request_code_none, request_code_write,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
+    collections::HashMap,
     ffi::CString,
+    io::{Read, Write},
     os::unix::prelude::OsStrExt,
     path::PathBuf,
-    process::{Output, Stdio},
+    process::Stdio,
     rc::Rc,
-    thread::JoinHandle,
+    sync::{mpsc::Sender, Arc, Mutex},
 };
 use structopt::StructOpt;
 
@@ -58,6 +60,8 @@ struct Args {
 
 fn main() {
     let args = Args::from_args();
+    // Wait for user to release key.
+    std::thread::sleep(std::time::Duration::from_millis(200));
     unsafe {
         match run(&args.devices, &args.name, &args.script) {
             Ok(()) => {}
@@ -78,11 +82,15 @@ unsafe fn run(
     let fd = create_uinput(device_name)?;
     loop {
         match run_event_loop(&devices, &script, fd) {
-            Ok(()) => {},
+            Ok(true) => continue,
+            Ok(false) => {
+                destroy_uinput(fd)?;
+                break Ok(());
+            }
             Err(e) => {
                 destroy_uinput(fd)?;
                 break Err(e);
-            },
+            }
         }
     }
 }
@@ -91,9 +99,11 @@ unsafe fn run_event_loop(
     devices: &[i32],
     script: impl AsRef<std::path::Path>,
     fd: i32,
-) -> Result<(), Error> {
-    let children = Rc::new(RefCell::new(Vec::new()));
-    let lua = create_lua(children.clone());
+) -> Result<bool, Error> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let should_exit = Rc::new(Cell::new(false));
+    let children_stdins = Arc::new(Mutex::new(HashMap::new()));
+    let lua = create_lua(tx, should_exit.clone(), children_stdins)?;
     let script = std::fs::read_to_string(&script)?;
     lua_attach_send_event(&lua, fd);
     lua.load(&script).exec()?;
@@ -127,31 +137,27 @@ unsafe fn run_event_loop(
     };
     let nfds = devices.iter().copied().max().unwrap_or(0) + 1;
     loop {
-        if should_break.get() {
-            for (handle, _) in children.borrow_mut().drain(..) {
-                handle.join().unwrap();
-            }
-            break;
+        if should_exit.get() {
+            break Ok(false);
         }
-        if !children.borrow().is_empty() {
-            {
-                let mut children = children.borrow_mut();
-                let finished = children
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (handle, _))| handle.is_finished())
-                    .map(|(i, _)| i);
-                if let Some(index) = finished {
-                    let (handle, ident) = children.swap_remove(index);
-                    // The lua script could call `execute` in the `exec_callback` function.
-                    // If the `children` RefCell wasn't dropped then the implementation
-                    // of `execute` would try to borrow children again causing a BorrowMutError.
-                    drop(children);
-                    let output = handle.join().unwrap();
-                    let stdout = lua.create_string(&output.stdout)?;
-                    let stderr = lua.create_string(&output.stderr)?;
-                    let code = output.status.code();
-                    exec_callback.call((ident, code, stdout, stderr))?;
+        if should_break.get() {
+            break Ok(true);
+        }
+        const EXEC_CALLBACK_EXIT: i32 = 0;
+        const EXEC_CALLBACK_STDOUT: i32 = 1;
+        const EXEC_CALLBACK_STDERR: i32 = 2;
+        for (message, ident) in rx.try_iter() {
+            match message {
+                ProcessMessage::Stdout(data) => {
+                    let data = lua.create_string(&data)?;
+                    exec_callback.call((ident, EXEC_CALLBACK_STDOUT, data))?;
+                }
+                ProcessMessage::Stderr(data) => {
+                    let data = lua.create_string(&data)?;
+                    exec_callback.call((ident, EXEC_CALLBACK_STDERR, data))?;
+                }
+                ProcessMessage::Exit(code) => {
+                    exec_callback.call((ident, EXEC_CALLBACK_EXIT, code))?;
                 }
             }
         }
@@ -161,7 +167,7 @@ unsafe fn run_event_loop(
         }
         let mut timeout: timeval = timeval {
             tv_sec: 0,
-            tv_usec: 500_000, // 500 ms
+            tv_usec: 1_000, // 1 ms
         };
         let code = libc::select(
             nfds,
@@ -192,7 +198,6 @@ unsafe fn run_event_loop(
                 .call::<(usize, u16, u16, i32), ()>((device, ev.type_, ev.code, ev.value))?;
         }
     }
-    Ok(())
 }
 
 fn open_devices(devices: &[PathBuf]) -> Result<Vec<i32>, Error> {
@@ -250,7 +255,7 @@ unsafe fn create_uinput(device_name: &str) -> Result<i32, Error> {
     for i in 0..REL_MAX as i32 {
         ui_set_relbit(fdo, i)?;
     }
-    
+
     ui_set_keybit(fdo, 57)?;
     if device_name.is_empty() {
         eprintln!("Name cannot be empty!");
@@ -284,25 +289,140 @@ unsafe fn destroy_uinput(fd: i32) -> Result<(), Error> {
     Ok(())
 }
 
-type Children = Rc<RefCell<Vec<(JoinHandle<Output>, i32)>>>;
-fn create_lua(children: Children) -> Lua {
+enum ProcessMessage {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(i32),
+}
+
+fn create_lua(
+    tx: Sender<(ProcessMessage, i32)>,
+    should_exit: Rc<Cell<bool>>,
+    children_stdins: Arc<Mutex<HashMap<i32, Sender<Vec<u8>>>>>,
+) -> Result<Lua, Error> {
     let lua = mlua::Lua::new();
     let execute = lua
-        .create_function(move |_, (ident, cmd, args): (i32, String, Vec<String>)| {
-            let handle = std::thread::spawn(move || {
-                std::process::Command::new(cmd)
-                    .args(args.into_iter())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .unwrap()
-            });
-            children.borrow_mut().push((handle, ident));
-            Ok(())
+        .create_function({
+            let children_stdins = children_stdins.clone();
+            move |_, (ident, cmd, args): (i32, String, Vec<String>)| {
+                let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
+                children_stdins.lock().unwrap().insert(ident, stdin_tx);
+                std::thread::spawn({
+                    let tx = tx.clone();
+                    let children_stdins = Arc::clone(&children_stdins);
+                    move || {
+                        let child = std::process::Command::new(cmd)
+                            .args(args.into_iter())
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn();
+                        let mut child = match child {
+                            Ok(child) => child,
+                            Err(error) => {
+                                tx.send((ProcessMessage::Stderr(format!("{error}").into()), ident))
+                                    .ok();
+                                tx.send((
+                                    ProcessMessage::Exit(error.raw_os_error().unwrap_or(1)),
+                                    ident,
+                                ))
+                                .ok();
+                                children_stdins.lock().unwrap().remove(&ident);
+                                return;
+                            }
+                        };
+                        let mut stdin = child.stdin.take().unwrap();
+                        let mut stdout = child.stdout.take().unwrap();
+                        let mut stderr = child.stderr.take().unwrap();
+                        std::thread::spawn(move || {
+                            for data in stdin_rx {
+                                match stdin.write_all(&data).and_then(|_| stdin.flush()) {
+                                    Ok(()) => {}
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                        std::thread::spawn({
+                            let tx = tx.clone();
+                            move || {
+                                let mut buf = [0; 128];
+                                loop {
+                                    let read = match stdout.read(&mut buf) {
+                                        Ok(read) => read,
+                                        Err(e) => match e.kind() {
+                                            std::io::ErrorKind::Interrupted => continue,
+                                            _ => break,
+                                        },
+                                    };
+                                    if read == 0 {
+                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                        continue;
+                                    }
+                                    if tx
+                                        .send((
+                                            ProcessMessage::Stdout(buf[0..read].to_vec()),
+                                            ident,
+                                        ))
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                drop(stdout);
+                            }
+                        });
+                        std::thread::spawn({
+                            let tx = tx.clone();
+                            move || loop {
+                                let mut buf = [0; 128];
+                                let read = match stderr.read(&mut buf) {
+                                    Ok(read) => read,
+                                    Err(e) => match e.kind() {
+                                        std::io::ErrorKind::Interrupted => continue,
+                                        _ => break,
+                                    },
+                                };
+                                if read == 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    continue;
+                                }
+                                if tx
+                                    .send((ProcessMessage::Stderr(buf[0..read].to_vec()), ident))
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        let exit_code = child.wait().unwrap().code().unwrap();
+                        tx.send((ProcessMessage::Exit(exit_code), ident)).ok();
+                        children_stdins.lock().unwrap().remove(&ident);
+                    }
+                });
+                Ok(())
+            }
         })
         .unwrap();
-    lua.globals().set("__async_execute", execute).unwrap();
-    lua
+    let write_stdin = lua
+        .create_function(move |_, (ident, value): (i32, mlua::String<'_>)| {
+            Ok(match children_stdins.lock().unwrap().get(&ident) {
+                Some(sender) => sender.send(value.as_bytes().to_vec()).is_ok(),
+                None => false,
+            })
+        })
+        .unwrap();
+    lua.globals().set("__async_execute", execute)?;
+    lua.globals().set("__process_write_stdin", write_stdin)?;
+    lua.globals().set(
+        "__exit",
+        lua.create_function({
+            move |_, ()| {
+                should_exit.set(true);
+                Ok(())
+            }
+        })?,
+    )?;
+    Ok(lua)
 }
 
 fn lua_attach_send_event(lua: &Lua, fd: i32) {
