@@ -167,7 +167,7 @@ unsafe fn run_event_loop(
         }
         let mut timeout: timeval = timeval {
             tv_sec: 0,
-            tv_usec: 1_000, // 1 ms
+            tv_usec: 200_000, // 100 ms
         };
         let code = libc::select(
             nfds,
@@ -355,7 +355,7 @@ fn create_lua(
                                         },
                                     };
                                     if read == 0 {
-                                        std::thread::sleep(std::time::Duration::from_millis(10));
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
                                         continue;
                                     }
                                     if tx
@@ -383,7 +383,7 @@ fn create_lua(
                                     },
                                 };
                                 if read == 0 {
-                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
                                     continue;
                                 }
                                 if tx
