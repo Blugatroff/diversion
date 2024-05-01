@@ -1,4 +1,4 @@
-local Promise = {}
+Promise = {}
 local PromiseMt = { __index = Promise }
 
 function Promise:new(f)
@@ -44,4 +44,3 @@ function Promise:next(f)
     end
 end
 
-return Promise

@@ -1,8 +1,4 @@
--- flip A and B
-
-dofile './codes.lua'
-local Promise = require 'promise'
-local diversion = require 'diversion'
+print("A and B are now flipped")
 
 local function on_event(device, ty, code, value)
     if ty == EV_KEY then

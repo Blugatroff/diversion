@@ -1,8 +1,4 @@
--- press F12 to reload your script
-
-dofile './codes.lua'
-local Promise = require 'promise'
-local diversion = require 'diversion'
+print("press F2 to reload your script")
 
 local function on_event(device, ty, code, value)
     if ty == EV_KEY and code == F2 then

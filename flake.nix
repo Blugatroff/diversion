@@ -13,9 +13,10 @@
             pkgs = import nixpkgs {
                 inherit system overlays;
             };
-            nativeBuildInputs = with pkgs; [ 
-                pkgs.rust-bin.stable.latest.default 
-                pkg-config 
+            nativeBuildInputs = with pkgs; [
+                pkgs.rust-bin.stable.latest.default
+                pkg-config
+                rust-analyzer
             ];
             buildInputs = [ pkgs.lua5_4 ];
         in {

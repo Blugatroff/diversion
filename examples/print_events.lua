@@ -1,8 +1,4 @@
--- hold F2 to print every event
-
-dofile './codes.lua'
-local Promise = require 'promise'
-local diversion = require 'diversion'
+print("hold F2 to print every event")
 
 local f2_pressed = false
 

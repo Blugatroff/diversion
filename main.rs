@@ -106,15 +106,12 @@ unsafe fn run_event_loop(
     let lua = create_lua(tx, should_exit.clone(), children_stdins)?;
     let script = std::fs::read_to_string(&script)?;
     lua_attach_send_event(&lua, fd);
-    lua.load(&script).exec()?;
-    let err_mapper = |e: mlua::Error| match e {
-        mlua::Error::FromLuaConversionError { .. } => Error::from(String::from(
-            "Failed to find global \"__on_event\" function!",
+    let err_mapper = |name: &'static str| move |e: mlua::Error| match e {
+        mlua::Error::FromLuaConversionError { .. } => Error::from(format!(
+            "Failed to find global \"{name}\" function!",
         )),
         e => Error::from(e),
     };
-    let event_callback: mlua::Function = lua.globals().get("__on_event").map_err(err_mapper)?;
-    let exec_callback: mlua::Function = lua.globals().get("__exec_callback").map_err(err_mapper)?;
     let should_break = Rc::new(Cell::new(false));
     lua.globals().set(
         "__reload",
@@ -126,6 +123,12 @@ unsafe fn run_event_loop(
             }
         })?,
     )?;
+    lua.load(include_str!("codes.lua")).exec()?;
+    lua.load(include_str!("promise.lua")).exec()?;
+    lua.load(include_str!("diversion.lua")).exec()?;
+    lua.load(&script).exec()?;
+    let event_callback: mlua::Function = lua.globals().get("__on_event").map_err(err_mapper("__on_event"))?;
+    let exec_callback: mlua::Function = lua.globals().get("__exec_callback").map_err(err_mapper("__exec_callback"))?;
     let mut ev: input_event = input_event {
         time: timeval {
             tv_sec: 0,

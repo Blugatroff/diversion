@@ -1,8 +1,4 @@
--- hold L_CTRL to reverse all mouse movement
-
-dofile './codes.lua'
-local Promise = require 'promise'
-local diversion = require 'diversion'
+print("hold L_CTRL to reverse all mouse movement")
 
 local ctrl_pressed = false
 
