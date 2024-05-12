@@ -13,8 +13,22 @@ WHEEL_PIXEL = 11
 
 -- see: https://github.com/torvalds/linux/blob/68e77ffbfd06ae3ef8f2abf1c3b971383c866983/include/uapi/linux/input-event-codes.h#L75
 ESCAPE = 1
+ONE = 2
+TWO = 3
+THREE = 4
+FOUR = 5
+FIVE = 6
+SIX = 7
+SEVEN = 8
+EIGHT = 9
+NINE = 10
+ZERO = 11
+MINUS = 12
+PLUS = 13
 BACKSPACE = 14
+TAB = 15
 Q = 16
+Q = 17
 W = 17
 E = 18
 R = 19

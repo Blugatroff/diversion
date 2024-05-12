@@ -7,6 +7,11 @@ diversion.spawn = function(cmd, args, stdout, stderr, exit)
     local ident = current_function
     current_function = current_function + 1
     _G.__async_execute(ident, cmd, args)
+
+    local function ignore() end
+    stdout = stdout or ignore
+    stderr = stderr or ignore
+    exit = exit or ignore
     process_callbacks[ident] = { stdout = stdout, stderr = stderr, exit = exit }
     return function(data)
         return _G.__process_write_stdin(ident, data)
