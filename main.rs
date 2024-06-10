@@ -16,7 +16,7 @@ use std::{
     path::PathBuf,
     process::Stdio,
     rc::Rc,
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{mpsc::Sender, Arc, Mutex, atomic::{AtomicBool, Ordering}},
 };
 use structopt::StructOpt;
 
@@ -334,6 +334,7 @@ fn create_lua(
                                 return;
                             }
                         };
+                        let has_exited = Arc::new(AtomicBool::new(false));
                         let mut stdin = child.stdin.take().unwrap();
                         let mut stdout = child.stdout.take().unwrap();
                         let mut stderr = child.stderr.take().unwrap();
@@ -347,37 +348,31 @@ fn create_lua(
                         });
                         std::thread::spawn({
                             let tx = tx.clone();
-                            move || {
-                                let mut buf = [0; 128];
-                                loop {
-                                    let read = match stdout.read(&mut buf) {
-                                        Ok(read) => read,
-                                        Err(e) => match e.kind() {
-                                            std::io::ErrorKind::Interrupted => continue,
-                                            _ => break,
-                                        },
-                                    };
-                                    if read == 0 {
-                                        std::thread::sleep(std::time::Duration::from_millis(200));
-                                        continue;
-                                    }
-                                    if tx
-                                        .send((
-                                            ProcessMessage::Stdout(buf[0..read].to_vec()),
-                                            ident,
-                                        ))
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
+                            let has_exited = has_exited.clone();
+                            let mut buf = [0; 128];
+                            move || while !has_exited.load(Ordering::Relaxed) {
+                                let read = match stdout.read(&mut buf) {
+                                    Ok(read) => read,
+                                    Err(e) => match e.kind() {
+                                        std::io::ErrorKind::Interrupted => continue,
+                                        _ => break,
+                                    },
+                                };
+                                if read == 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                    continue;
                                 }
-                                drop(stdout);
+                                let msg = ProcessMessage::Stdout(buf[0..read].to_vec());
+                                if tx.send((msg, ident)).is_err() {
+                                    break;
+                                }
                             }
                         });
                         std::thread::spawn({
                             let tx = tx.clone();
-                            move || loop {
-                                let mut buf = [0; 128];
+                            let has_exited = has_exited.clone();
+                            let mut buf = [0; 128];
+                            move || while !has_exited.load(Ordering::Relaxed) {
                                 let read = match stderr.read(&mut buf) {
                                     Ok(read) => read,
                                     Err(e) => match e.kind() {
@@ -389,15 +384,14 @@ fn create_lua(
                                     std::thread::sleep(std::time::Duration::from_millis(200));
                                     continue;
                                 }
-                                if tx
-                                    .send((ProcessMessage::Stderr(buf[0..read].to_vec()), ident))
-                                    .is_err()
-                                {
+                                let msg = ProcessMessage::Stderr(buf[0..read].to_vec());
+                                if tx.send((msg, ident)).is_err() {
                                     break;
                                 }
                             }
                         });
                         let exit_code = child.wait().unwrap().code().unwrap();
+                        has_exited.store(true, Ordering::Relaxed);
                         tx.send((ProcessMessage::Exit(exit_code), ident)).ok();
                         children_stdins.lock().unwrap().remove(&ident);
                     }
