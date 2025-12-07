@@ -2,8 +2,8 @@ use mlua::Lua;
 use nix::{
     ioctl_none_bad, ioctl_write_int_bad, ioctl_write_ptr_bad,
     libc::{
-        self, fd_set, input_event, timeval, FD_ISSET, FD_SET, O_NONBLOCK, O_RDONLY, O_WRONLY,
-        REL_MAX,
+        self, FD_ISSET, FD_SET, O_NONBLOCK, O_RDONLY, O_WRONLY, REL_MAX, fd_set, input_event,
+        timeval,
     },
     request_code_none, request_code_write,
 };
@@ -16,7 +16,11 @@ use std::{
     path::PathBuf,
     process::Stdio,
     rc::Rc,
-    sync::{mpsc::Sender, Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
 };
 use structopt::StructOpt;
 
@@ -60,6 +64,7 @@ struct Args {
 
 fn main() {
     let args = Args::from_args();
+
     // Wait for user to release key.
     std::thread::sleep(std::time::Duration::from_millis(200));
     unsafe {
@@ -78,18 +83,20 @@ unsafe fn run(
     device_name: &str,
     script: impl AsRef<std::path::Path>,
 ) -> Result<(), Error> {
-    let devices: Vec<i32> = open_devices(devices)?;
-    let fd = create_uinput(device_name)?;
-    loop {
-        match run_event_loop(&devices, &script, fd) {
-            Ok(true) => continue,
-            Ok(false) => {
-                destroy_uinput(fd)?;
-                break Ok(());
-            }
-            Err(e) => {
-                destroy_uinput(fd)?;
-                break Err(e);
+    unsafe {
+        let devices: Vec<i32> = open_devices(devices)?;
+        let fd = create_uinput(device_name)?;
+        loop {
+            match run_event_loop(&devices, &script, fd) {
+                Ok(true) => continue,
+                Ok(false) => {
+                    destroy_uinput(fd)?;
+                    break Ok(());
+                }
+                Err(e) => {
+                    destroy_uinput(fd)?;
+                    break Err(e);
+                }
             }
         }
     }
@@ -100,105 +107,115 @@ unsafe fn run_event_loop(
     script: impl AsRef<std::path::Path>,
     fd: i32,
 ) -> Result<bool, Error> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let should_exit = Rc::new(Cell::new(false));
-    let children_stdins = Arc::new(Mutex::new(HashMap::new()));
-    let lua = create_lua(tx, should_exit.clone(), children_stdins)?;
-    let script = std::fs::read_to_string(&script)?;
-    lua_attach_send_event(&lua, fd);
-    let err_mapper = |name: &'static str| move |e: mlua::Error| match e {
-        mlua::Error::FromLuaConversionError { .. } => Error::from(format!(
-            "Failed to find global \"{name}\" function!",
-        )),
-        e => Error::from(e),
-    };
-    let should_break = Rc::new(Cell::new(false));
-    lua.globals().set(
-        "__reload",
-        lua.create_function({
-            let should_break = should_break.clone();
-            move |_, ()| {
-                should_break.set(true);
-                Ok(())
+    unsafe {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let should_exit = Rc::new(Cell::new(false));
+        let children_stdins = Arc::new(Mutex::new(HashMap::new()));
+        let lua = create_lua(tx, should_exit.clone(), children_stdins)?;
+        let script = std::fs::read_to_string(&script)?;
+        lua_attach_send_event(&lua, fd);
+        let err_mapper = |name: &'static str| {
+            move |e: mlua::Error| match e {
+                mlua::Error::FromLuaConversionError { .. } => {
+                    Error::from(format!("Failed to find global \"{name}\" function!",))
+                }
+                e => Error::from(e),
             }
-        })?,
-    )?;
-    lua.load(include_str!("codes.lua")).exec()?;
-    lua.load(include_str!("promise.lua")).exec()?;
-    lua.load(include_str!("diversion.lua")).exec()?;
-    lua.load(&script).exec()?;
-    let event_callback: mlua::Function = lua.globals().get("__on_event").map_err(err_mapper("__on_event"))?;
-    let exec_callback: mlua::Function = lua.globals().get("__exec_callback").map_err(err_mapper("__exec_callback"))?;
-    let mut ev: input_event = input_event {
-        time: timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        type_: 0,
-        code: 0,
-        value: 0,
-    };
-    let nfds = devices.iter().copied().max().unwrap_or(0) + 1;
-    loop {
-        if should_exit.get() {
-            break Ok(false);
-        }
-        if should_break.get() {
-            break Ok(true);
-        }
-        const EXEC_CALLBACK_EXIT: i32 = 0;
-        const EXEC_CALLBACK_STDOUT: i32 = 1;
-        const EXEC_CALLBACK_STDERR: i32 = 2;
-        for (message, ident) in rx.try_iter() {
-            match message {
-                ProcessMessage::Stdout(data) => {
-                    let data = lua.create_string(&data)?;
-                    exec_callback.call((ident, EXEC_CALLBACK_STDOUT, data))?;
-                }
-                ProcessMessage::Stderr(data) => {
-                    let data = lua.create_string(&data)?;
-                    exec_callback.call((ident, EXEC_CALLBACK_STDERR, data))?;
-                }
-                ProcessMessage::Exit(code) => {
-                    exec_callback.call((ident, EXEC_CALLBACK_EXIT, code))?;
-                }
-            }
-        }
-        let mut set: fd_set = std::mem::transmute([0u8; std::mem::size_of::<fd_set>()]);
-        for fd in devices {
-            FD_SET(*fd, &mut set as *mut fd_set);
-        }
-        let mut timeout: timeval = timeval {
-            tv_sec: 0,
-            tv_usec: 200_000, // 100 ms
         };
-        let code = libc::select(
-            nfds,
-            &mut set as *mut fd_set,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut timeout as *mut timeval,
-        );
-        if code == 0 {
-            continue;
-        }
-        for (device, fd) in devices.iter().copied().enumerate() {
-            if !FD_ISSET(fd, &set as *const fd_set) {
-                continue;
+        let should_break = Rc::new(Cell::new(false));
+        lua.globals().set(
+            "__reload",
+            lua.create_function({
+                let should_break = should_break.clone();
+                move |_, ()| {
+                    should_break.set(true);
+                    Ok(())
+                }
+            })?,
+        )?;
+        lua.load(include_str!("codes.lua")).exec()?;
+        lua.load(include_str!("promise.lua")).exec()?;
+        lua.load(include_str!("diversion.lua")).exec()?;
+        lua.load(&script).exec()?;
+        let event_callback: mlua::Function = lua
+            .globals()
+            .get("__on_event")
+            .map_err(err_mapper("__on_event"))?;
+        let exec_callback: mlua::Function = lua
+            .globals()
+            .get("__exec_callback")
+            .map_err(err_mapper("__exec_callback"))?;
+        let mut ev: input_event = input_event {
+            time: timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            type_: 0,
+            code: 0,
+            value: 0,
+        };
+        let nfds = devices.iter().copied().max().unwrap_or(0) + 1;
+        loop {
+            if should_exit.get() {
+                break Ok(false);
             }
-            let code = libc::read(
-                fd,
-                &mut ev as *mut _ as *mut libc::c_void,
-                std::mem::size_of_val(&ev),
+            if should_break.get() {
+                break Ok(true);
+            }
+            const EXEC_CALLBACK_EXIT: i32 = 0;
+            const EXEC_CALLBACK_STDOUT: i32 = 1;
+            const EXEC_CALLBACK_STDERR: i32 = 2;
+            for (message, ident) in rx.try_iter() {
+                match message {
+                    ProcessMessage::Stdout(data) => {
+                        let data = lua.create_string(&data)?;
+                        exec_callback.call::<()>((ident, EXEC_CALLBACK_STDOUT, data))?;
+                    }
+                    ProcessMessage::Stderr(data) => {
+                        let data = lua.create_string(&data)?;
+                        exec_callback.call::<()>((ident, EXEC_CALLBACK_STDERR, data))?;
+                    }
+                    ProcessMessage::Exit(code) => {
+                        exec_callback.call::<()>((ident, EXEC_CALLBACK_EXIT, code))?;
+                    }
+                }
+            }
+            let mut set: fd_set = std::mem::transmute([0u8; std::mem::size_of::<fd_set>()]);
+            for fd in devices {
+                FD_SET(*fd, &mut set as *mut fd_set);
+            }
+            let mut timeout: timeval = timeval {
+                tv_sec: 0,
+                tv_usec: 200_000, // 100 ms
+            };
+            let code = libc::select(
+                nfds,
+                &mut set as *mut fd_set,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut timeout as *mut timeval,
             );
-            if code < 0 {
-                Err(std::io::Error::last_os_error())?;
-            }
-            if code < 24 {
+            if code == 0 {
                 continue;
             }
-            event_callback
-                .call::<(usize, u16, u16, i32), ()>((device, ev.type_, ev.code, ev.value))?;
+            for (device, fd) in devices.iter().copied().enumerate() {
+                if !FD_ISSET(fd, &set as *const fd_set) {
+                    continue;
+                }
+                let code = libc::read(
+                    fd,
+                    &mut ev as *mut _ as *mut libc::c_void,
+                    std::mem::size_of_val(&ev),
+                );
+                if code < 0 {
+                    Err(std::io::Error::last_os_error())?;
+                }
+                if code < 24 {
+                    continue;
+                }
+                event_callback
+                    .call::<()>((device, ev.type_, ev.code, ev.value))?;
+            }
         }
     }
 }
@@ -235,61 +252,65 @@ fn open_devices(devices: &[PathBuf]) -> Result<Vec<i32>, Error> {
 }
 
 unsafe fn create_uinput(device_name: &str) -> Result<i32, Error> {
-    let path = CString::new("/dev/uinput").unwrap();
-    let fdo = libc::open(path.as_ptr(), O_WRONLY | O_NONBLOCK);
-    if fdo < 0 {
-        println!("cannot open {}", path.to_str().unwrap());
-        Result::<(), std::io::Error>::Err(std::io::Error::last_os_error())?;
-    }
+    unsafe {
+        let path = CString::new("/dev/uinput").unwrap();
+        let fdo = libc::open(path.as_ptr(), O_WRONLY | O_NONBLOCK);
+        if fdo < 0 {
+            println!("cannot open {}", path.to_str().unwrap());
+            Result::<(), std::io::Error>::Err(std::io::Error::last_os_error())?;
+        }
 
-    ui_set_evbit(fdo, EV_SYN)?;
-    ui_set_evbit(fdo, EV_MSC)?;
-    ui_set_evbit(fdo, EV_KEY)?;
-    ui_set_evbit(fdo, EV_REL)?;
+        ui_set_evbit(fdo, EV_SYN)?;
+        ui_set_evbit(fdo, EV_MSC)?;
+        ui_set_evbit(fdo, EV_KEY)?;
+        ui_set_evbit(fdo, EV_REL)?;
 
-    for i in 0..255 {
-        ui_set_keybit(fdo, i)?;
-    }
-    for i in BTN_LEFT..=BTN_TASK {
-        ui_set_keybit(fdo, i)?;
-    }
+        for i in 0..255 {
+            ui_set_keybit(fdo, i)?;
+        }
+        for i in BTN_LEFT..=BTN_TASK {
+            ui_set_keybit(fdo, i)?;
+        }
 
-    //ui_set_keybit(fdo, 255)?;
-    for i in 0..REL_MAX as i32 {
-        ui_set_relbit(fdo, i)?;
-    }
+        //ui_set_keybit(fdo, 255)?;
+        for i in 0..REL_MAX as i32 {
+            ui_set_relbit(fdo, i)?;
+        }
 
-    ui_set_keybit(fdo, 57)?;
-    if device_name.is_empty() {
-        eprintln!("Name cannot be empty!");
-        std::process::exit(1);
-    } else if device_name.len() > 0x50 {
-        eprintln!("Name cannot be longer than {} characters!", 0x50);
-        std::process::exit(1);
+        ui_set_keybit(fdo, 57)?;
+        if device_name.is_empty() {
+            eprintln!("Name cannot be empty!");
+            std::process::exit(1);
+        } else if device_name.len() > 0x50 {
+            eprintln!("Name cannot be longer than {} characters!", 0x50);
+            std::process::exit(1);
+        }
+        let mut name = [0; 0x50];
+        for (i, b) in device_name.as_bytes().iter().enumerate() {
+            name[i] = *b as i8;
+        }
+        let setup: libc::uinput_setup = libc::uinput_setup {
+            id: libc::input_id {
+                bustype: BUS_USB,
+                vendor: 1,
+                product: 1,
+                version: 1,
+            },
+            name,
+            ff_effects_max: 0,
+        };
+        ui_dev_setup(fdo, &setup as *const libc::uinput_setup)?;
+        ui_dev_create(fdo)?;
+        Ok(fdo)
     }
-    let mut name = [0; 0x50];
-    for (i, b) in device_name.as_bytes().iter().enumerate() {
-        name[i] = *b as i8;
-    }
-    let setup: libc::uinput_setup = libc::uinput_setup {
-        id: libc::input_id {
-            bustype: BUS_USB,
-            vendor: 1,
-            product: 1,
-            version: 1,
-        },
-        name,
-        ff_effects_max: 0,
-    };
-    ui_dev_setup(fdo, &setup as *const libc::uinput_setup)?;
-    ui_dev_create(fdo)?;
-    Ok(fdo)
 }
 
 unsafe fn destroy_uinput(fd: i32) -> Result<(), Error> {
-    ui_dev_destroy(fd)?;
-    libc::close(fd);
-    Ok(())
+    unsafe {
+        ui_dev_destroy(fd)?;
+        libc::close(fd);
+        Ok(())
+    }
 }
 
 enum ProcessMessage {
@@ -350,21 +371,23 @@ fn create_lua(
                             let tx = tx.clone();
                             let has_exited = has_exited.clone();
                             let mut buf = [0; 128];
-                            move || while !has_exited.load(Ordering::Relaxed) {
-                                let read = match stdout.read(&mut buf) {
-                                    Ok(read) => read,
-                                    Err(e) => match e.kind() {
-                                        std::io::ErrorKind::Interrupted => continue,
-                                        _ => break,
-                                    },
-                                };
-                                if read == 0 {
-                                    std::thread::sleep(std::time::Duration::from_millis(200));
-                                    continue;
-                                }
-                                let msg = ProcessMessage::Stdout(buf[0..read].to_vec());
-                                if tx.send((msg, ident)).is_err() {
-                                    break;
+                            move || {
+                                while !has_exited.load(Ordering::Relaxed) {
+                                    let read = match stdout.read(&mut buf) {
+                                        Ok(read) => read,
+                                        Err(e) => match e.kind() {
+                                            std::io::ErrorKind::Interrupted => continue,
+                                            _ => break,
+                                        },
+                                    };
+                                    if read == 0 {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        continue;
+                                    }
+                                    let msg = ProcessMessage::Stdout(buf[0..read].to_vec());
+                                    if tx.send((msg, ident)).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         });
@@ -372,21 +395,23 @@ fn create_lua(
                             let tx = tx.clone();
                             let has_exited = has_exited.clone();
                             let mut buf = [0; 128];
-                            move || while !has_exited.load(Ordering::Relaxed) {
-                                let read = match stderr.read(&mut buf) {
-                                    Ok(read) => read,
-                                    Err(e) => match e.kind() {
-                                        std::io::ErrorKind::Interrupted => continue,
-                                        _ => break,
-                                    },
-                                };
-                                if read == 0 {
-                                    std::thread::sleep(std::time::Duration::from_millis(200));
-                                    continue;
-                                }
-                                let msg = ProcessMessage::Stderr(buf[0..read].to_vec());
-                                if tx.send((msg, ident)).is_err() {
-                                    break;
+                            move || {
+                                while !has_exited.load(Ordering::Relaxed) {
+                                    let read = match stderr.read(&mut buf) {
+                                        Ok(read) => read,
+                                        Err(e) => match e.kind() {
+                                            std::io::ErrorKind::Interrupted => continue,
+                                            _ => break,
+                                        },
+                                    };
+                                    if read == 0 {
+                                        std::thread::sleep(std::time::Duration::from_millis(200));
+                                        continue;
+                                    }
+                                    let msg = ProcessMessage::Stderr(buf[0..read].to_vec());
+                                    if tx.send((msg, ident)).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         });
@@ -401,7 +426,7 @@ fn create_lua(
         })
         .unwrap();
     let write_stdin = lua
-        .create_function(move |_, (ident, value): (i32, mlua::String<'_>)| {
+        .create_function(move |_, (ident, value): (i32, mlua::String)| {
             Ok(match children_stdins.lock().unwrap().get(&ident) {
                 Some(sender) => sender.send(value.as_bytes().to_vec()).is_ok(),
                 None => false,
