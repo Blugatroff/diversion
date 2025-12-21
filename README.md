@@ -28,7 +28,7 @@ In the **/dev/input/by-id/** directory are symlinks to these files with helpful 
 To test whether you found the correct device you can simply cat the file and press some buttons, if you see a bunch of binary garbage whenever you press something then you got the the right file.
 
 ## Lua Interface
-The Lua interface is provided by the [**diversion.lua**](https://github.com/Blugatroff/diversion/diversion.lua) module.
+The Lua interface is provided by the [**diversion.lua**](https://github.com/Kato-Dax/diversion/blob/main/diversion.lua) module.
 
 - **listen**(listener: (**device_id**: number, **type**: number, **code**: number, **value**: number) -> void)<br>
     Attach a listener function to receive events from diversion.<br>
@@ -55,7 +55,7 @@ The Lua interface is provided by the [**diversion.lua**](https://github.com/Blug
     This function returns a **Promise** which will, as soon as the command exits, resolve to a table with the fields **stdout**, **stderr** and **code**.
 
 ## Examples
-The [**examples**](https://github.com/Blugatroff/diversion/tree/main/examples/) directory contains the following examples.<br>
+The [**examples**](https://github.com/Kato-Dax/diversion/tree/main/examples/) directory contains the following examples.<br>
 You can run them like this:
 ```bash
 diversion --name "diversion" ./example/hello.lua [devices]...
@@ -69,7 +69,7 @@ diversion --name "diversion" ./example/hello.lua [devices]...
 - **print_events.lua** <br>
     Print every received event while **F2** is pressed.
 
-You can also have a look at the shortcuts i am currenty using myself [here](https://github.com/Blugatroff/diversions) although that might not be very helpful since i didn't write any comments there.
+You can also have a look at the shortcuts i am currenty using myself [here](https://github.com/Kato-Dax/diversions) although that might not be very helpful since i didn't write any comments there.
 
 ## How it works
 Diversion grabs exclusive access of every input device using the [EVIOCGRAB ioctl syscall](https://github.com/torvalds/linux/blob/aa051d36ce4ae23b488489f6b15abad68b59ca23/include/uapi/linux/input.h#L183).
